@@ -1,5 +1,5 @@
 # Set the URL of the website to scrape
-$url = "https://bunkr.la/a/jW1AHeZl"
+$url = ""
 
 # Set the regular expression to match video file links
 $regex = '([^"]*\.(mp4|avi|wmv))'
