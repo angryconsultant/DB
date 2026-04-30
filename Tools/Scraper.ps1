@@ -145,12 +145,50 @@ function Invoke-DefaultScraper {
     $overallStopwatch = [System.Diagnostics.Stopwatch]::StartNew()
     $downloadCount = 0
     $skippedCount = 0
+    $seenFilenames = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
 
-    Write-Log 'Requesting main page HTML'
+    # Fetch page 1 to discover pagination
+    Write-Log 'Requesting page 1 HTML'
     $html = Invoke-WebRequest -Uri $Url
 
-    $links = $html.Links | Where-Object { $_.href -match '^/f/' } | Select-Object -ExpandProperty href | Select-Object -Unique
-    Write-Log ("Found {0} top-level file links" -f $links.Count)
+    # Detect last page from pagination nav (e.g. href="?page=5")
+    $pageMatches = [regex]::Matches($html.Content, 'href="\?page=(\d+)"')
+    $lastPage = 1
+    foreach ($m in $pageMatches) {
+        $pageNum = [int]$m.Groups[1].Value
+        if ($pageNum -gt $lastPage) { $lastPage = $pageNum }
+    }
+
+    if ($lastPage -gt 1) {
+        Write-Log ("Detected {0} pages of content" -f $lastPage)
+    }
+
+    # Collect /f/ links from all pages
+    $allLinks = [System.Collections.Generic.List[string]]::new()
+
+    # Page 1 links (already fetched)
+    $html.Links | Where-Object { $_.href -match '^/f/' } | ForEach-Object { $allLinks.Add($_.href) }
+    Write-Log ("Page 1: found {0} file links" -f $allLinks.Count)
+
+    # Fetch remaining pages
+    for ($page = 2; $page -le $lastPage; $page++) {
+        $separator = if ($Url.Contains('?')) { '&' } else { '?' }
+        $pageUrl = "{0}{1}page={2}" -f $Url, $separator, $page
+        Write-Log ("Requesting page {0}/{1}" -f $page, $lastPage)
+        try {
+            $pageHtml = Invoke-WebRequest -Uri $pageUrl -ErrorAction Stop
+            $pageLinks = $pageHtml.Links | Where-Object { $_.href -match '^/f/' } | Select-Object -ExpandProperty href
+            $countBefore = $allLinks.Count
+            foreach ($pl in $pageLinks) { $allLinks.Add($pl) }
+            Write-Log ("Page {0}: found {1} file links" -f $page, ($allLinks.Count - $countBefore))
+        }
+        catch {
+            Write-Log ("Failed to fetch page {0}: {1}" -f $page, $_.Exception.Message) 'ERROR'
+        }
+    }
+
+    $links = $allLinks | Select-Object -Unique
+    Write-Log ("Found {0} total unique file links across {1} page(s)" -f $links.Count, $lastPage)
 
     foreach ($link in $links) {
         Write-Log ("Following link {0}" -f $link)
@@ -214,6 +252,14 @@ function Invoke-DefaultScraper {
         }
         $filepath = Join-Path -Path $DownloadPath -ChildPath $filename
 
+        if (-not $seenFilenames.Add($filename)) {
+            Write-Log ("Skipping duplicate filename {0}" -f $filename) 'DEBUG'
+            $skippedCount++
+            $subpageStopwatch.Stop()
+            Write-Log ("Finished processing {0} in {1:N2}s" -f $link, $subpageStopwatch.Elapsed.TotalSeconds) 'DEBUG'
+            continue
+        }
+
         if (Test-Path -LiteralPath $filepath) {
             Write-Log ("Skipping existing file {0}" -f $filename) 'DEBUG'
             $skippedCount++
@@ -253,7 +299,7 @@ function Invoke-DefaultScraper {
 
 # ── Main ──────────────────────────────────────────────────────────────────────
 # Set the URL of the website to scrape
-$url = "https://example.com/album/12345"  # <-- Change this to the actual URL you want to scrape
+$url = "https://example.com/"  # <-- Change this to the actual URL you want to scrape
 
 # Set the path to save the downloaded video files
 $path = "C:\Users\DanielBjörk\Downloads\x"
